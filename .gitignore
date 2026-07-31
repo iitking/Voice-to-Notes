@@ -1,0 +1,27 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.log
+
+# Node dependencies & builds
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Media & Storage
+storage/audio/*
+!storage/audio/.gitkeep
+test_speech.wav
+
+# System files
+.DS_Store
+Thumbs.db
