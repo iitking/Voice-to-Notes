@@ -8,11 +8,12 @@
 [![faster-whisper](https://img.shields.io/badge/faster--whisper-Local_STT-blue?style=for-the-badge)](https://github.com/SYSTRAN/faster-whisper)
 [![Ollama](https://img.shields.io/badge/Ollama-Local_LLM-black?style=for-the-badge&logo=ollama)](https://ollama.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Alembic](https://img.shields.io/badge/Alembic-Migrations-red?style=for-the-badge)](https://alembic.sqlalchemy.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 
 An end-to-end, **100% local-first** voice-to-notes web application. Record audio directly in the browser or upload an audio file, transcribe it locally with **faster-whisper**, and synthesize structured notes, executive summaries, and action items using a **local LLM running on Ollama**, with full persistence in **PostgreSQL**.
 
-[Features](#-key-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [API Contract](#-api-contract) • [Testing](#-testing--verification) • [Author](#-author)
+[Features](#-key-features) • [Architecture](#-architecture) • [Security & Single-User Model](#-security--single-user-architecture) • [Quick Start](#-quick-start) • [Database Migrations](#-database-migrations-alembic) • [API Contract](#-api-contract) • [Testing](#-testing--verification) • [Author](#-author)
 
 </div>
 
@@ -21,7 +22,8 @@ An end-to-end, **100% local-first** voice-to-notes web application. Record audio
 ## ✨ Key Features
 
 - 🎙️ **Browser Audio Recording:** Live microphone capture using the MediaRecorder API with active timer, audio waveform indicator, and pause/resume controls.
-- 📂 **Multi-format Audio Upload:** Drag-and-drop file upload supporting `.wav`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.aac`, and `.flac` (up to 100MB).
+- ⚡ **Chunked Streaming Upload:** High-performance 1MB streaming chunk uploads with strict real-time size limit enforcement (up to 100MB) preventing RAM bloat under concurrent load.
+- 📂 **Multi-format Audio Upload:** Drag-and-drop file upload supporting `.wav`, `.mp3`, `.m4a`, `.webm`, `.ogg`, `.aac`, and `.flac`.
 - ⚙️ **FFmpeg Normalization:** Automatic audio stream inspection and conversion to 16kHz mono WAV for optimal speech recognition.
 - ⚡ **Local Speech Recognition:** Local transcription powered by `faster-whisper` (CTranslate2) with automatic language detection, VAD silence filtering, and precise timestamped segments.
 - 🧠 **Structured Note Synthesis:** Local LLM inference via `Ollama` (`qwen2.5:3b`) extracting:
@@ -30,7 +32,9 @@ An end-to-end, **100% local-first** voice-to-notes web application. Record audio
   - **Key Points & Discussion Highlights**
   - **Action Items** (with assigned owners, deadlines, and interactive completion checkboxes)
   - **Keyword Tags**
-- 🗄️ **Relational PostgreSQL Storage:** Persistent storage for audio metadata, background jobs, transcripts, segments, and notes.
+- 🗄️ **Relational PostgreSQL Storage:** Persistent storage for audio metadata, background jobs, transcripts, segments, and notes with **Alembic** schema migrations.
+- 🔄 **Resilient Background Processing:** Asynchronous job execution with startup recovery that automatically detects and clears dangling jobs if the server restarts.
+- 🌐 **Dynamic CORS Security:** Environment-driven CORS configuration safeguarding REST endpoints.
 - 📥 **One-Click Export:** Download notes in clean Markdown (`.md`) or formatted Plain Text (`.txt`).
 - 🔒 **Privacy First:** 100% offline local inference — zero audio or transcripts leave your machine.
 
@@ -42,14 +46,14 @@ An end-to-end, **100% local-first** voice-to-notes web application. Record audio
 flowchart TD
     subgraph FE ["Frontend: React + Vite"]
         MIC["🎙️ In-Browser Mic Recording"]
-        UPL["📁 Audio File Upload (WAV, MP3, M4A)"]
+        UPL["📁 Chunked Audio Upload (WAV, MP3, M4A)"]
         UI["📝 Notes View & Checklists"]
     end
 
     subgraph BE ["Backend: FastAPI"]
         API["⚡ REST API Endpoints"]
-        VAL["🛡️ Audio Validation & Storage"]
-        WORKER["🔄 Background Task Pipeline"]
+        STREAM["🌊 Streaming Upload Handler"]
+        WORKER["🔄 Background Task Pipeline & Recovery"]
     end
 
     subgraph AI ["Local AI Processing Engines"]
@@ -60,17 +64,19 @@ flowchart TD
 
     subgraph DB ["Database: PostgreSQL 16"]
         POSTGRES["🗄️ Relational Database (Audio, Transcripts, Notes, Tasks)"]
+        MIGRATIONS["📜 Alembic Migrations"]
     end
 
     MIC --> API
-    UPL --> API
-    API --> VAL
-    VAL --> WORKER
+    UPL --> STREAM
+    STREAM --> API
+    API --> WORKER
     WORKER --> FF
     FF --> STT
     STT --> LLM
     STT --> POSTGRES
     LLM --> POSTGRES
+    MIGRATIONS --> POSTGRES
     POSTGRES --> API
     API --> UI
 ```
@@ -81,8 +87,8 @@ flowchart TD
 
 | Stage | Component | Engine / Tool | Input | Output / Result |
 |:---:|:---|:---|:---|:---|
-| **1** | **Audio Capture** | Browser MediaRecorder / File Dropzone | Microphone speech or audio file | Audio Blob (`.wav`, `.mp3`, `.m4a`, etc.) |
-| **2** | **Ingestion & Validation** | FastAPI Server (`POST /api/v1/audio`) | Multipart Form Data | Secure UUID audio file & queued job |
+| **1** | **Audio Capture** | Browser MediaRecorder / Dropzone | Microphone speech or audio file | Audio Blob (`.wav`, `.mp3`, `.m4a`, etc.) |
+| **2** | **Streaming Ingestion** | FastAPI Server (`POST /api/v1/audio`) | Chunked Multipart Stream | Secure UUID audio file on disk (low RAM) & queued job |
 | **3** | **Audio Normalization** | FFmpeg & ffprobe CLI | Raw audio file | Validated 16kHz 16-bit mono WAV |
 | **4** | **Speech Recognition** | `faster-whisper` (CTranslate2, int8) | 16kHz mono WAV | Full text transcript & timestamped segments |
 | **5** | **AI Note Synthesis** | `Ollama` (`qwen2.5:3b`) | Transcript text | Title, summary, key points, tasks & tags |
@@ -90,22 +96,33 @@ flowchart TD
 
 ---
 
-### 📋 Detailed Step-by-Step Breakdown
+## 🔒 Security & Single-User Architecture
 
-1. **Audio Capture & Ingestion:**
-   The user records spoken audio in the browser via `MediaRecorder` or uploads an existing file. FastAPI validates the file extension and size (<= 100MB), saves the file under a UUID name, creates a database job record, and triggers the background worker.
+> [!NOTE]
+> **Single-User Workstation Design:**
+> This project is intentionally engineered as a **local-first, privacy-centric single-user application**. All audio files, transcripts, vector/relational databases, and LLM inferences remain strictly on the host workstation (`localhost`). It does not include multi-tenant user authentication (RBAC) by design, prioritizing zero cloud reliance, zero external data leakage, and low setup friction.
 
-2. **FFmpeg Inspection & Normalization:**
-   `ffprobe` verifies that a valid audio stream exists and checks duration (<= 3600s). `ffmpeg` normalizes the audio stream into a standard 16kHz mono 16-bit PCM WAV file for optimal recognition accuracy.
+If you deploy this application to an internal network or remote server, it is recommended to place it behind an authenticating reverse proxy:
+- **Reverse Proxy / TLS:** Nginx, Caddy, or Traefik terminating HTTPS.
+- **Authentication Layer:** Basic Auth, Cloudflare Access, Authelia, or an OAuth2 Proxy protecting both the frontend and `/api/*` routes.
+- **CORS Management:** Configure `CORS_ORIGINS` in `.env` to restrict cross-origin requests to your trusted domain.
 
-3. **Local faster-whisper Transcription:**
-   The normalized audio is processed by `faster-whisper` running locally on the CPU (using int8 quantization). Voice Activity Detection (VAD) automatically removes background silence, detects the spoken language, and segments the speech with start and end timestamps.
+---
 
-4. **Local Ollama Structured Note Generation:**
-   The transcript is passed to `qwen2.5:3b` hosted on local `Ollama` with a strict JSON system prompt. The model extracts a concise title, an executive summary, bulleted key points, action items (with owner and deadline), and topical keywords.
+## 🔄 Background Job Resilience & Scaling
 
-5. **PostgreSQL Storage & Interactive UI:**
-   Transcripts, segments, notes, and action items are committed to PostgreSQL. The React frontend polls the job status, updates the stepper in real-time, and renders the completed notes with interactive task checkboxes, inline editing, and one-click Markdown/TXT export.
+- **FastAPI Lifespan Startup Recovery:** If the backend crashes or restarts during an active transcription or note generation task, the server automatically queries all pending jobs (`queued`, `validating`, `transcribing`, `generating_notes`) and transitions them to `failed` with code `SERVER_INTERRUPTED`, preventing ghost states in the user interface.
+- **Scaling to Distributed Queues (Celery + Redis):**
+  For enterprise or high-concurrency production deployments where jobs must survive node restarts and scale across multiple worker processes:
+  1. Add Redis: `docker run -d -p 6379:6379 redis:7-alpine`
+  2. Swap `BackgroundTasks.add_task` with a Celery task:
+     ```python
+     # Example Celery task definition
+     @celery_app.task(bind=True, max_retries=3)
+     def celery_audio_pipeline(self, job_id: str, audio_file_id: str, language: str):
+         run_audio_pipeline(job_id=job_id, audio_file_id=audio_file_id, language=language)
+     ```
+  3. Run separate Celery worker daemons: `celery -A app.workers.celery worker --loglevel=info -c 4`
 
 ---
 
@@ -114,11 +131,12 @@ flowchart TD
 | Layer | Technology | Purpose |
 |---|---|---|
 | **Frontend** | React 18, Vite, Tailwind CSS, Lucide Icons | Responsive modern studio UI & note editor |
-| **Backend** | Python 3.12, FastAPI, Pydantic V2 | REST API, background worker, and audio routing |
+| **Backend** | Python 3.12, FastAPI, Pydantic V2 | REST API, streaming ingest, and audio routing |
 | **Speech-to-Text** | `faster-whisper` (CTranslate2, int8) | High-speed local speech recognition |
 | **Audio Processing** | FFmpeg & ffprobe | Audio inspection, duration checks, and 16kHz WAV conversion |
 | **Local LLM** | Ollama (`qwen2.5:3b`) | Local structured note, summary, and action items synthesis |
 | **Database** | PostgreSQL 16, SQLAlchemy 2.0 | Relational persistence for audio, jobs, transcripts & notes |
+| **Migrations** | Alembic | Version-controlled schema migrations |
 
 ---
 
@@ -161,6 +179,21 @@ chmod +x run.sh
 
 ---
 
+## 📜 Database Migrations (Alembic)
+
+Database schema migrations are managed via **Alembic**:
+
+```bash
+# Apply migrations to database
+cd backend
+.venv/bin/alembic upgrade head
+
+# Create a new migration revision after model changes
+.venv/bin/alembic revision -m "add_new_column"
+```
+
+---
+
 ## 💻 Manual Setup
 
 If you prefer running services in separate terminals:
@@ -177,7 +210,10 @@ pip install -r backend/requirements.txt
 # 3. Environment configuration
 cp .env.example backend/.env
 
-# 4. Start backend server
+# 4. Run database migrations
+cd backend && alembic upgrade head && cd ..
+
+# 5. Start backend server
 export PYTHONPATH=backend
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
@@ -196,7 +232,7 @@ npm run dev
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/health` | System health check (PostgreSQL, Ollama, Whisper status) |
-| `POST` | `/api/v1/audio` | Upload audio file / recording & start processing job |
+| `POST` | `/api/v1/audio` | Upload audio stream & start asynchronous processing job |
 | `GET` | `/api/v1/jobs/{job_id}` | Poll processing stage and progress |
 | `GET` | `/api/v1/transcripts/{id}` | Retrieve transcript with timestamped segments |
 | `GET` | `/api/v1/notes` | List saved notes (with optional `?search=` filter) |
@@ -228,6 +264,9 @@ backend/.venv/bin/python test_e2e.py
 ```text
 voice-to-notes/
 ├── backend/
+│   ├── alembic/                 # Alembic migration environment & revisions
+│   │   ├── versions/            # Schema migration scripts
+│   │   └── env.py
 │   ├── app/
 │   │   ├── api/routes/          # REST endpoints (health, audio, notes)
 │   │   ├── core/                # App configuration (pydantic-settings)
@@ -236,8 +275,11 @@ voice-to-notes/
 │   │   ├── schemas/             # Pydantic V2 schemas
 │   │   ├── services/            # Services (AudioService, Transcription, Notes)
 │   │   ├── workers/             # Background pipeline worker
-│   │   └── main.py              # FastAPI application entrypoint
-│   ├── tests/                   # Backend pytest suite
+│   │   └── main.py              # FastAPI application entrypoint with lifespan recovery
+│   ├── tests/
+│   │   ├── fixtures/            # Test audio samples (WAV fixtures)
+│   │   └── test_api.py          # Backend pytest suite
+│   ├── alembic.ini              # Alembic configuration
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -252,13 +294,13 @@ voice-to-notes/
 ├── .env.example
 ├── .gitignore
 ├── run.sh                       # One-click launcher script
-├── test_e2e.py                  # End-to-end integration test
+├── test_e2e.py                  # End-to-end integration test with auto-fixture generator
 └── README.md
 ```
 
 ---
 
-## 👨💻 Author
+## 👨‍💻 Author
 
 <div align="center">
 

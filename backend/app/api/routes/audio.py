@@ -16,13 +16,9 @@ async def upload_audio(
     language: Optional[str] = Form("auto"),
     db: Session = Depends(get_db),
 ):
-    """Uploads an audio file, persists metadata, and starts transcription & note generation."""
+    """Uploads an audio file via chunked streaming, persists metadata, and starts transcription & note generation."""
     try:
-        content = await file.read()
-        storage_filename, storage_path, file_size = audio_service.save_upload(
-            original_filename=file.filename or "recording.wav",
-            file_bytes=content,
-        )
+        storage_filename, storage_path, file_size = await audio_service.save_upload_stream(file)
 
         audio_record = AudioFile(
             original_filename=file.filename or storage_filename,

@@ -20,7 +20,6 @@ dist-ssr/
 # Media & Storage
 storage/audio/*
 !storage/audio/.gitkeep
-test_speech.wav
 
 # System files
 .DS_Store

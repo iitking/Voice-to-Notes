@@ -4,6 +4,7 @@ import uuid
 import subprocess
 import shutil
 from typing import Tuple, Dict, Any, Optional
+from fastapi import UploadFile
 from app.core.config import settings
 
 class AudioServiceError(Exception):
@@ -16,6 +17,50 @@ class AudioService:
     def __init__(self, storage_dir: str = settings.AUDIO_STORAGE_DIR):
         self.storage_dir = storage_dir
         os.makedirs(self.storage_dir, exist_ok=True)
+
+    async def save_upload_stream(self, upload_file: UploadFile) -> Tuple[str, str, int]:
+        """Streams uploaded audio directly to disk in chunks to prevent memory pressure."""
+        original_filename = upload_file.filename or "recording.wav"
+        _, ext = os.path.splitext(original_filename)
+        safe_ext = ext.lower() if ext else ""
+        allowed_exts = [".wav", ".mp3", ".m4a", ".ogg", ".webm", ".aac", ".flac"]
+        if safe_ext not in allowed_exts:
+            raise AudioServiceError(
+                "UNSUPPORTED_FORMAT",
+                f"Unsupported audio file extension '{safe_ext}'. Allowed: {', '.join(allowed_exts)}"
+            )
+
+        filename = f"{uuid.uuid4()}{safe_ext}"
+        storage_path = os.path.join(self.storage_dir, filename)
+        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        file_size = 0
+        chunk_size = 1024 * 1024  # 1MB chunk
+
+        try:
+            with open(storage_path, "wb") as f:
+                while True:
+                    chunk = await upload_file.read(chunk_size)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    if file_size > max_bytes:
+                        raise AudioServiceError(
+                            "FILE_TOO_LARGE",
+                            f"File size exceeds limit of {settings.MAX_UPLOAD_SIZE_MB}MB."
+                        )
+                    f.write(chunk)
+
+            if file_size == 0:
+                raise AudioServiceError("EMPTY_FILE", "Uploaded file is empty (0 bytes).")
+
+            return filename, storage_path, file_size
+        except Exception:
+            if os.path.exists(storage_path):
+                try:
+                    os.remove(storage_path)
+                except OSError:
+                    pass
+            raise
 
     def save_upload(self, original_filename: str, file_bytes: bytes) -> Tuple[str, str, int]:
         """Saves uploaded raw bytes under a secure UUID filename."""
