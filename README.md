@@ -36,40 +36,87 @@ An end-to-end, **100% local-first** voice-to-notes web application. Record audio
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ System Architecture & Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             REACT + VITE FRONTEND                               │
+│   🎙️ Live Mic Recording   │   📁 File Upload Dropzone   │   📝 Notes & Tasks UI │
+└────────────────────────────────────────┬────────────────────────────────────────┘
+                                         │  HTTP / REST API (Multipart Form)
+                                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                             FASTAPI BACKEND SERVICE                             │
+│   • Input Validation & Secure Storage     • Background Job Pipeline Worker      │
+│   • Real-time Polling & Status Tracking   • Markdown / Plain Text Exporter      │
+└───────────┬────────────────────────────┬────────────────────────────┬───────────┘
+            │ 1. Convert Audio           │ 2. Transcribe Audio        │ 3. Generate Notes
+            ▼                            ▼                            ▼
+   ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
+   │     FFmpeg      │          │ faster-whisper  │          │     Ollama      │
+   │ Audio Inspection│ ───────> │ Local Speech-to-│ ───────> │    Local LLM    │
+   │ & 16kHz WAV PCM │          │  Text Inference │          │  (qwen2.5:3b)   │
+   └─────────────────┘          └────────┬────────┘          └────────┬────────┘
+                                         │ Transcript &               │ Structured
+                                         │ Timestamps                 │ Notes & Tasks
+                                         ▼                            ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              POSTGRESQL DATABASE                                │
+│   [audio_files]  ──>  [processing_jobs]  ──>  [transcripts]  ──>  [notes]       │
+│                                                └─> [segments]       └─> [tasks] │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 🔄 How the Processing Pipeline Works
 
 ```mermaid
-flowchart LR
-    subgraph Frontend["Frontend (React + Vite)"]
-        REC["Mic Recording / File Upload"]
-        UI["Studio & Notes View"]
+flowchart TD
+    classDef client fill:#f0fdfa,stroke:#0d9488,stroke-width:2px,color:#0f766e;
+    classDef backend fill:#f8fafc,stroke:#475569,stroke-width:2px,color:#1e293b;
+    classDef engine fill:#eff6ff,stroke:#2563eb,stroke-width:2px,color:#1e40af;
+    classDef storage fill:#fdf4ff,stroke:#9333ea,stroke-width:2px,color:#6b21a8;
+
+    subgraph Client["1. Client Layer"]
+        A["🎙️ User Speaks / Uploads File"]:::client
+        B["React Studio (Live Timer & Visualizer)"]:::client
     end
 
-    subgraph Backend["Backend (FastAPI)"]
-        API["REST API Routes"]
-        PIPE["Background Pipeline"]
+    subgraph Server["2. Backend Ingestion"]
+        C["FastAPI POST /api/v1/audio"]:::backend
+        D["Save Audio & Create Job in PostgreSQL"]:::backend
+        E["Enqueue Background Processing Worker"]:::backend
     end
 
-    subgraph Engines["Local AI Engines"]
-        FF["FFmpeg Normalization"]
-        FW["faster-whisper (STT)"]
-        OL["Ollama Local LLM"]
+    subgraph Processing["3. Local AI Processing Pipeline"]
+        F["FFmpeg: Probe duration & normalize to 16kHz mono WAV"]:::engine
+        G["faster-whisper: Speech-to-Text inference with VAD filtering"]:::engine
+        H["Ollama (qwen2.5:3b): Synthesize structured JSON notes & action items"]:::engine
     end
 
-    subgraph Database["Database"]
-        DB[(PostgreSQL 16)]
+    subgraph Persistence["4. Persistence & Presentation"]
+        I[("PostgreSQL: Store Transcripts, Segments, Notes, Tasks")]:::storage
+        J["React UI: Interactive Notes, Checklists & Markdown Export"]:::client
     end
 
-    REC -->|Multipart POST| API
-    API --> PIPE
-    PIPE --> FF
-    FF --> FW
-    FW -->|Transcript & Segments| DB
-    FW --> OL
-    OL -->|Structured JSON Notes| DB
-    DB --> API
-    API --> UI
+    A --> B
+    B -->|Audio Blob| C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    G -.->|Save Text & Segments| I
+    H -.->|Save Notes & Actions| I
+    I --> J
 ```
+
+### 📋 Pipeline Stages Breakdown
+
+1. **Audio Capture & Ingestion:** The browser records audio via `MediaRecorder` API or the user uploads an audio file (`.wav`, `.mp3`, `.m4a`, etc.). The frontend transmits it as a multipart request to FastAPI.
+2. **Validation & Normalization:** `ffprobe` validates the audio stream and limits (duration $\le$ 3600s, size $\le$ 100MB). `ffmpeg` normalizes the audio into 16kHz 16-bit mono WAV.
+3. **Local Speech Recognition (faster-whisper):** Local CTranslate2 engine transcribes the audio, detects the spoken language, applies Voice Activity Detection (VAD) to trim silence, and generates timestamped sentence segments.
+4. **Local LLM Synthesis (Ollama):** The full transcript is sent to local `qwen2.5:3b` with a strict JSON system prompt. The model extracts title, executive summary, bulleted key points, action items (with owner & deadline), and keywords.
+5. **Database Persistence & Real-time UI:** Transcripts, segments, and notes are committed to PostgreSQL. The frontend polling engine detects completion and renders the structured notes view with live action item toggling and Markdown export.
 
 ---
 
