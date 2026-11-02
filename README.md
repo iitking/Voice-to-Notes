@@ -36,35 +36,43 @@ An end-to-end, **100% local-first** voice-to-notes web application. Record audio
 
 ---
 
-## 🏗️ System Architecture & Data Flow
+## 🏗️ Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                             REACT + VITE FRONTEND                               │
-│   🎙️ Live Mic Recording   │   📁 File Upload Dropzone   │   📝 Notes & Tasks UI │
-└────────────────────────────────────────┬────────────────────────────────────────┘
-                                         │  HTTP / REST API (Multipart Form)
-                                         ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                             FASTAPI BACKEND SERVICE                             │
-│   • Input Validation & Secure Storage     • Background Job Pipeline Worker      │
-│   • Real-time Polling & Status Tracking   • Markdown / Plain Text Exporter      │
-└───────────┬────────────────────────────┬────────────────────────────┬───────────┘
-            │ 1. Normalize Audio         │ 2. Transcribe Speech       │ 3. Synthesize Notes
-            ▼                            ▼                            ▼
-   ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
-   │     FFmpeg      │          │ faster-whisper  │          │     Ollama      │
-   │ Audio Inspection│ ───────> │ Local Speech-to-│ ───────> │    Local LLM    │
-   │ & 16kHz WAV PCM │          │  Text Inference │          │  (qwen2.5:3b)   │
-   └─────────────────┘          └────────┬────────┘          └────────┬────────┘
-                                         │ Transcript &               │ Structured
-                                         │ Timestamps                 │ Notes & Tasks
-                                         ▼                            ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              POSTGRESQL DATABASE                                │
-│   [audio_files]  ──>  [processing_jobs]  ──>  [transcripts]  ──>  [notes]       │
-│                                                └─> [segments]       └─> [tasks] │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph FE ["Frontend: React + Vite"]
+        MIC["🎙️ In-Browser Mic Recording"]
+        UPL["📁 Audio File Upload (WAV, MP3, M4A)"]
+        UI["📝 Notes View & Checklists"]
+    end
+
+    subgraph BE ["Backend: FastAPI"]
+        API["⚡ REST API Endpoints"]
+        VAL["🛡️ Audio Validation & Storage"]
+        WORKER["🔄 Background Task Pipeline"]
+    end
+
+    subgraph AI ["Local AI Processing Engines"]
+        FF["🔊 FFmpeg: 16kHz WAV Normalization"]
+        STT["⚡ faster-whisper: Speech-to-Text & VAD"]
+        LLM["🧠 Ollama: Structured Notes LLM (qwen2.5:3b)"]
+    end
+
+    subgraph DB ["Database: PostgreSQL 16"]
+        POSTGRES["🗄️ Relational Database (Audio, Transcripts, Notes, Tasks)"]
+    end
+
+    MIC --> API
+    UPL --> API
+    API --> VAL
+    VAL --> WORKER
+    WORKER --> FF
+    FF --> STT
+    STT --> LLM
+    STT --> POSTGRES
+    LLM --> POSTGRES
+    POSTGRES --> API
+    API --> UI
 ```
 
 ---
